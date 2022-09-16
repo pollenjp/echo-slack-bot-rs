@@ -11,20 +11,21 @@ RUN cargo build --release && \
 # copy a project and build it
 COPY . /app
 
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN toml get ./Cargo.toml package.name | \
     sed 's/-/_/g' | \
     xargs -I{} rm -rf ./target/release/deps/{}*
 
-RUN cargo test
-RUN cargo build --release
-RUN toml get ./Cargo.toml package.name | \
+RUN cargo test && \
+    cargo build --release && \
+    toml get ./Cargo.toml package.name | \
     xargs -I{} cp "./target/release/{}" "/app/app-release"
 
 FROM ghcr.io/linuxcontainers/debian-slim:11 as prod
 ARG APP=/usr/src/app
 
 RUN apt-get update \
-    && apt-get install -y ca-certificates tzdata \
+    && apt-get install --no-install-recommends -y ca-certificates tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 ENV TZ=Etc/UTC \
