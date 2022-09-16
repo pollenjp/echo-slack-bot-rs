@@ -1,41 +1,43 @@
-FROM rust:1.63 as builder
+FROM ekidd/rust-musl-builder:1.57.0 as builder
 
-# build a template project for creating cache images
-RUN USER=root cargo new --bin /app
-WORKDIR /app
-COPY ./Cargo.toml ./Cargo.toml
-RUN cargo build --release && \
-    rm src/*.rs && \
-    cargo install toml-cli
+ARG BUILD_TARGET=x86_64-unknown-linux-musl
 
-# copy a project and build it
-COPY . /app
+WORKDIR /home/rust/src
+RUN cargo install toml-cli
+
+COPY . ./
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-RUN toml get ./Cargo.toml package.name | \
-    sed 's/-/_/g' | \
-    xargs -I{} rm -rf ./target/release/deps/{}*
-
-RUN cargo test && \
-    cargo build --release && \
-    toml get ./Cargo.toml package.name | \
-    xargs -I{} cp "./target/release/{}" "/app/app-release"
+RUN \
+    cargo test \
+    && \
+    cargo build --release --target "${BUILD_TARGET}" \
+    && \
+    toml get ./Cargo.toml package.name \
+    | \
+    xargs -I{} mv "./target/${BUILD_TARGET}/release/{}" "app-release"
 
 FROM ghcr.io/linuxcontainers/debian-slim:11 as prod
 ARG APP=/usr/src/app
 
-RUN apt-get update \
-    && apt-get install --no-install-recommends -y ca-certificates tzdata \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update -y \
+    && \
+    apt-get install --no-install-recommends -y \
+    ca-certificates=20210119 \
+    tzdata=2021a-1+deb11u5 \
+    && \
+    rm -rf /var/lib/apt/lists/*
 
 ENV TZ=Etc/UTC \
     APP_USER=appuser
 
 RUN groupadd $APP_USER \
-    && useradd -g $APP_USER $APP_USER \
-    && mkdir -p ${APP}
+    && \
+    useradd -g $APP_USER $APP_USER \
+    && \
+    mkdir -p ${APP}
 
-COPY --from=builder /app/app-release ${APP}/app
+COPY --from=builder /home/rust/src/app-release ${APP}/app
 
 RUN chown -R $APP_USER:$APP_USER ${APP}
 
