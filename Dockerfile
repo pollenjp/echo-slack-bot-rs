@@ -1,4 +1,4 @@
-FROM ekidd/rust-musl-builder:1.57.0 as builder
+FROM ekidd/rust-musl-builder:latest as builder
 
 ARG BUILD_TARGET=x86_64-unknown-linux-musl
 
