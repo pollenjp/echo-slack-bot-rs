@@ -6,8 +6,8 @@ on:
     branches:
       - main
 
-permissions:
-  contents: read
+env:
+  IMAGE_NAME: ${{ github.event.repository.name }}
 
 jobs:
   release:
