@@ -1,21 +1,41 @@
-use async_std::stream::StreamExt;
-use futures_util::sink::SinkExt;
+use anyhow::{Context as _, Result, bail};
+use futures_util::{SinkExt, StreamExt as _};
 use serde::{Deserialize, Serialize};
+use tokio_tungstenite::connect_async;
 
+#[tokio::main]
+async fn main() {
+    if let Err(e) = run().await {
+        eprintln!("Error: {:?}", e);
+        std::process::exit(1);
+    }
+}
+
+/// https://api.slack.com/methods/apps.connections.open
+///
+/// ```json
+/// {
+///   "ok": true,
+///   "url": "wss://wss-somethiing.slack.com/link/?ticket=12348&app_id=5678"
+/// }
+/// ```
 #[derive(Deserialize, Debug)]
-pub struct OpenConnectionsResponse {
+pub struct SlackApiAppConnectionsOpenResponse {
     pub ok: bool,
     pub url: Option<String>,
     pub error: Option<String>,
 }
-pub async fn open_connections(token: &str) -> surf::Result<OpenConnectionsResponse> {
-    surf::post("https://slack.com/api/apps.connections.open")
-        .header(
-            surf::http::headers::AUTHORIZATION,
-            format!("Bearer {}", token),
-        )
-        .recv_json()
-        .await
+
+pub async fn open_connections(token: &str) -> Result<SlackApiAppConnectionsOpenResponse> {
+    let client = reqwest::Client::new();
+    let response = client
+        .post("https://slack.com/api/apps.connections.open")
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await?
+        .json::<SlackApiAppConnectionsOpenResponse>()
+        .await?;
+    Ok(response)
 }
 
 struct SlackClient {
@@ -23,32 +43,68 @@ struct SlackClient {
 }
 
 impl SlackClient {
-    pub async fn send_message(&self, channel: &str, text: &str) -> surf::Result<()> {
-        surf::post("https://slack.com/api/chat.postMessage")
-            .header(
-                surf::http::headers::AUTHORIZATION,
-                format!("Bearer {}", self.token),
-            )
-            .header(
-                surf::http::headers::CONTENT_TYPE,
-                "application/json; charset=utf-8",
-            )
-            .body_json(&serde_json::json!({
+    pub async fn send_message(&self, channel: &str, text: &str) -> Result<()> {
+        let client = reqwest::Client::new();
+        let response = client
+            .post("https://slack.com/api/chat.postMessage")
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Content-Type", "application/json; charset=utf-8")
+            .json(&serde_json::json!({
                 "channel": channel,
                 "text": text,
-            }))?
-            .recv_string()
+            }))
+            .send()
             .await?;
+
+        if !response.status().is_success() {
+            bail!("Failed to send message: {}", response.status());
+        }
+
         Ok(())
     }
 }
 
+/// https://api.slack.com/apis/socket-mode#events
+///
+/// ```json
+/// {
+///   "payload": <event_payload>,
+///   "envelope_id": <unique_identifier_string>,
+///   "type": <event_type_enum>,
+///   "accepts_response_payload": <accepts_response_payload_bool>
+/// }
+/// ```
+///
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum SocketModeMessage<'s> {
     Hello {},
-    Disconnect { reason: &'s str },
-    EventsApi { envelope_id: &'s str },
+    Disconnect {
+        reason: &'s str,
+    },
+    EventsApi {
+        payload: serde_json::Value,
+        envelope_id: &'s str,
+    },
+    SlashCommands {
+        payload: serde_json::Value,
+        envelope_id: &'s str,
+    },
+    Interactive {
+        payload: serde_json::Value,
+        envelope_id: &'s str,
+    },
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+struct MentionedPayload {
+    pub event: MentionedPayloadEvent,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+struct MentionedPayloadEvent {
+    pub channel: String,
+    pub text: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -80,38 +136,51 @@ impl RawConfig {
     }
 }
 
-#[async_std::main]
-async fn main() {
+async fn run() -> Result<()> {
     let config = RawConfig::from_env();
+
     let slack_client = SlackClient {
         token: config.user_oauth_token,
     };
 
-    let con_result = open_connections(config.app_level_token.as_str())
+    let con_result = open_connections(&config.app_level_token)
         .await
-        .expect("Failed to request apps.connections.open");
+        .with_context(|| "connecting to slack api")?;
+
     if !con_result.ok {
-        panic!(
-            "app.connections.open failed: {}",
+        bail!(
+            "connecting to app.connections.open: {}",
             con_result.error.as_deref().unwrap_or("Unknown error")
         );
     }
-    let wss_url = con_result.url.expect("no url passed from server");
-    let url = url::Url::parse(&wss_url).expect("Failed to parse entrypoint url");
-    let domain = url.domain().expect("no domain name?");
-    let tcp_stream = async_std::net::TcpStream::connect(&format!("{}:443", domain))
-        .await
-        .expect("Failed to connect tcp stream");
-    let enc_stream = async_tls::TlsConnector::default()
-        .connect(domain, tcp_stream)
-        .await
-        .expect("Failed to connect encrypted stream");
-    let (mut stream, _) = async_tungstenite::client_async(wss_url, enc_stream)
-        .await
-        .expect("Failed to connect websocket");
 
-    while let Some(m) = stream.next().await {
-        match m.expect("Failed to decode websocket frame") {
+    let wss_url = con_result
+        .url
+        .ok_or_else(|| anyhow::anyhow!("missing wss url from server"))?;
+
+    let (stream, _) = connect_async(wss_url).await?;
+    let (mut write, mut read) = stream.split();
+
+    // let mut read_stream = tokio_tungstenite::WebSocketStream::from_raw_socket(read, true, None);
+    // let mut write_stream = tokio_tungstenite::WebSocketStream::from_raw_socket(write, true, None);
+
+    while let Some(m) = read.next().await {
+        let m = match m {
+            Ok(m) => m,
+            Err(e) => {
+                println!("Failed to read websocket frame: {:?}", e);
+                continue;
+            }
+        };
+
+        // debug message
+        println!("message {:?}", m);
+
+        // https://api.slack.com/apis/socket-mode#events
+        match m {
+            tungstenite::Message::Ping(bytes) => {
+                println!("ping: {:?}", bytes);
+            }
             tungstenite::Message::Text(t) => match serde_json::from_str(&t) {
                 Ok(SocketModeMessage::Hello { .. }) => {
                     println!("Hello: {}", t);
@@ -120,58 +189,58 @@ async fn main() {
                     println!("Disconnect request: {}", reason);
                     break;
                 }
-                Ok(SocketModeMessage::EventsApi { envelope_id, .. }) => {
-                    println!("Events API Message: {}", t);
-                    stream
-                        .send(tungstenite::Message::Text(
-                            serde_json::to_string(&SocketModeAcknowledgeMessage {
-                                envelope_id,
-                                payload: None,
-                            })
-                            .expect("Failed to serialize ack message"),
-                        ))
-                        .await
-                        .expect("Failed to reply ack message");
+                Ok(SocketModeMessage::EventsApi {
+                    payload,
+                    envelope_id,
+                    ..
+                }) => {
+                    println!("Received Events API Message: {:?}", payload);
 
-                    match serde_json::from_str::<serde_json::Value>(&t) {
-                        Ok(v) => {
-                            let event = v
-                                .get("payload")
-                                .and_then(|v| v.get("event"))
-                                .expect("Failed to get event");
-                            slack_client
-                                .send_message(
-                                    event
-                                        .get("channel")
-                                        .and_then(|v| v.as_str())
-                                        .expect("Failed to get channel id"),
-                                    &format!(
-                                        "You said: {}",
-                                        format!(
-                                            "```{}```",
-                                            event
-                                                .get("text")
-                                                .and_then(|v| v.as_str())
-                                                .expect("Failed to get text")
-                                        )
-                                    ),
-                                )
-                                .await
-                                .expect("Failed to send message");
-                        }
-                        Err(e) => {
-                            println!("Failed to parse event: {}", e);
-                        }
+                    // reply ack message
+                    // https://api.slack.com/apis/socket-mode#acknowledge
+                    //
+                    // {
+                    //   "envelope_id": <$unique_identifier_string>,
+                    //   "payload": <$payload_shape> // optional
+                    // }
+                    //
+                    let ack_message = serde_json::to_string(&SocketModeAcknowledgeMessage {
+                        envelope_id,
+                        payload: None,
+                    })
+                    .with_context(|| "serializing ack message")?;
+                    write
+                        .send(tungstenite::Message::Text(ack_message.into()))
+                        .await
+                        .with_context(|| "replying ack message")?;
+
+                    if let Ok(mentioned) = serde_json::from_value::<MentionedPayload>(payload) {
+                        let event = mentioned.event;
+                        slack_client
+                            .send_message(
+                                &event.channel,
+                                &format!(
+                                    "You said: ```{}```",
+                                    event.text.unwrap_or_else(String::new)
+                                ),
+                            )
+                            .await
+                            .with_context(|| "sending message")?;
                     }
                 }
                 Err(e) => {
-                    println!("Unknown text frame: {}: {:?}", t, e);
+                    println!("Failed to parse websocket frame: {:?}", e);
+                }
+                Ok(SocketModeMessage::SlashCommands { payload, .. }) => {
+                    println!("SlashCommands: {}", payload);
+                }
+                Ok(SocketModeMessage::Interactive { payload, .. }) => {
+                    println!("Interactive: {}", payload);
                 }
             },
-            tungstenite::Message::Ping(bytes) => {
-                println!("ping: {:?}", bytes);
-            }
-            _ => println!("Unknown frame"),
+            _ => println!("unsupported frame"),
         }
     }
+
+    Ok(())
 }
