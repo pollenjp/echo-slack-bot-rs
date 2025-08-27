@@ -1,3 +1,20 @@
 [tools]
 direnv = "2.37.1"
 rust = "1.89.0"
+
+[tasks.run]
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+docker compose up --build
+'''
+
+
+[tasks.clean]
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+docker compose down || true
+'''

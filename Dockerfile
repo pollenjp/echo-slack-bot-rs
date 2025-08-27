@@ -1,47 +1,37 @@
-FROM ekidd/rust-musl-builder:latest as builder
+# https://hub.docker.com/_/rust#supported-tags-and-respective-dockerfile-links
+FROM mirror.gcr.io/rust:1.89-bookworm AS base
 
-ARG BUILD_TARGET=x86_64-unknown-linux-musl
+WORKDIR /code
+RUN cargo init
+COPY Cargo.toml /code/Cargo.toml
+RUN cargo fetch
+COPY . /code
 
-WORKDIR /home/rust/src
-RUN cargo install toml-cli
+FROM base AS builder
+RUN cargo build --release --offline
 
-COPY . ./
+# https://hub.docker.com/_/debian#supported-tags-and-respective-dockerfile-links
+FROM mirror.gcr.io/debian:12.1-slim AS release
 
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-RUN \
-    cargo test \
-    && \
-    cargo build --release --target "${BUILD_TARGET}" \
-    && \
-    toml get ./Cargo.toml package.name \
-    | \
-    xargs -I{} mv "./target/${BUILD_TARGET}/release/{}" "app-release"
-
-FROM ghcr.io/linuxcontainers/debian-slim:11 as prod
-ARG APP=/usr/src/app
-
-RUN apt-get update -y \
-    && \
-    apt-get install --no-install-recommends -y \
-    ca-certificates=20210119 \
-    tzdata=2021a-1+deb11u5 \
-    && \
-    rm -rf /var/lib/apt/lists/*
+# RUN apt-get update -y \
+#     && \
+#     apt-get install --no-install-recommends -y \
+#     ca-certificates=20210119 \
+#     tzdata=2021a-1+deb11u5 \
 
 ENV TZ=Etc/UTC \
-    APP_USER=appuser
+    APP_USER=appuser \
+    BIN_NAME=echo-slack-bot-rs
+COPY --from=builder /code/target/release/"${BIN_NAME}" /app
 
-RUN groupadd $APP_USER \
-    && \
-    useradd -g $APP_USER $APP_USER \
-    && \
-    mkdir -p ${APP}
+# Install ca-certificates
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /home/rust/src/app-release ${APP}/app
+RUN groupadd "$APP_USER" \
+    && useradd -g "$APP_USER" "$APP_USER"
+RUN chown "$APP_USER":"$APP_USER" /app
 
-RUN chown -R $APP_USER:$APP_USER ${APP}
-
-USER $APP_USER
-WORKDIR ${APP}
-
-CMD ["./app"]
+USER "$APP_USER"
+CMD [ "/app" ]
