@@ -1,4 +1,4 @@
-# repeat-slack-bot-rs
+# echo-slack-bot-rs
 
 Required environment variables
 
