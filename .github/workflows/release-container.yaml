@@ -37,7 +37,7 @@ jobs:
           PKG_VERSION: ${{ steps.version.outputs.version }}
         run: |
           if gh api -H "Accept: application/vnd.github.v3+json" /users/pollenjp/packages/container/echo-slack-bot-rs/versions \
-            | jq -r '.[].metadata.container.tags' \
+            | jq -r '.[].metadata.container.tags | sort | .[]' \
             | grep -q "${PKG_VERSION}"; then
             echo "Version $PKG_VERSION already exists"
             echo "run_upload=0" >> "$GITHUB_OUTPUT"
