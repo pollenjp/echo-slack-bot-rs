@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.1](https://github.com/pollenjp/echo-slack-bot-rs/compare/v0.2.0...v0.2.1) (2025-08-29)
+
+
+### Bug Fixes
+
+* **ci:** change environment ([873aedb](https://github.com/pollenjp/echo-slack-bot-rs/commit/873aedb88fbc9b8a382ba285963bd13fb055a275))
+* **docs:** rename h1 ([#8](https://github.com/pollenjp/echo-slack-bot-rs/issues/8)) ([3de6938](https://github.com/pollenjp/echo-slack-bot-rs/commit/3de6938b90b2d78bdec82fa477024c204e949094))
+
 ## [0.2.0](https://github.com/pollenjp/echo-slack-bot-rs/compare/v0.1.6...v0.2.0) (2025-08-27)
 
 
